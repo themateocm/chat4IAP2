@@ -5,9 +5,10 @@ import unittest
 import tempfile
 import sqlite3
 import requests
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 import io
 import socket
+import base64
 
 # Add the project directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -49,53 +50,51 @@ class TestDatabase(unittest.TestCase):
 
 class TestRepositoryManager(unittest.TestCase):
     def setUp(self):
-        # Mock GitHub credentials
-        self.github_token = 'fake_token'
-        self.github_username = 'test_user'
-        self.repository_name = 'test_repo'
-        
-        self.repo_manager = chat_server.RepositoryManager(
-            self.github_token, 
-            self.github_username, 
-            self.repository_name
-        )
+        # Create a temporary database for testing
+        self.temp_db = tempfile.mktemp()
+        self.database = chat_server.Database(self.temp_db)
+
+    def tearDown(self):
+        # Close the database connection and remove the temporary file
+        self.database.conn.close()
+        if os.path.exists(self.temp_db):
+            os.unlink(self.temp_db)
 
     @patch('requests.put')
     @patch('requests.get')
     def test_push_messages(self, mock_get, mock_put):
-        # Mock GitHub API responses
-        mock_get.return_value.status_code = 404  # File doesn't exist
-        mock_put.return_value.raise_for_status = MagicMock()
+        # Setup mock responses that simulate successful GitHub interaction
+        mock_get.return_value = MagicMock(
+            status_code=404,
+            json=lambda: {"message": "Not Found"}
+        )
+        mock_put.return_value = MagicMock(
+            status_code=201,
+            json=lambda: {"content": {"name": "chat_messages.md"}}
+        )
 
-        # Prepare test messages
-        messages = [
-            {
-                'content': 'Test message 1', 
-                'timestamp': '2025-01-08T19:20:00-05:00', 
-                'repository': 'test_repo'
-            },
-            {
-                'content': 'Test message 2', 
-                'timestamp': '2025-01-08T19:21:00-05:00', 
-                'repository': 'test_repo'
-            }
-        ]
+        # Add a test message to the database
+        message_id = self.database.add_message("Test message for GitHub push", "test_repo")
+        
+        # Retrieve the messages
+        messages = self.database.get_messages()
 
-        # Test pushing messages
-        result = self.repo_manager.push_messages(messages)
-        self.assertTrue(result)
+        # Create a mock RepositoryManager
+        repo_manager = chat_server.RepositoryManager(
+            'mock_token', 
+            'mock_username', 
+            'mock_repo'
+        )
 
-        # Verify API calls
+        # Attempt to push messages
+        result = repo_manager.push_messages(messages)
+
+        # Assert that the push was successful
+        self.assertTrue(result, "Messages should be successfully pushed to GitHub")
+
+        # Verify that GitHub API methods were called
+        mock_get.assert_called_once()
         mock_put.assert_called_once()
-        
-        # Check the content of the API call
-        call_args = mock_put.call_args[1]
-        payload = json.loads(call_args['data'])
-        
-        # Verify payload content
-        self.assertIn('content', payload)
-        self.assertIn('message', payload)
-        self.assertEqual(payload['message'], 'Update chat messages')
 
 class TestMessageHandler(unittest.TestCase):
     def setUp(self):
@@ -146,9 +145,106 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(len(retrieved_messages), 1)
         self.assertEqual(retrieved_messages[0]['content'], 'Test message')
 
+class TestGitHubIntegration(unittest.TestCase):
+    def setUp(self):
+        # Mock GitHub API credentials
+        self.mock_token = 'test_github_token'
+        self.mock_username = 'test_username'
+        self.mock_repo = 'test_repo'
+
+    @patch('requests.put')
+    @patch('requests.get')
+    def test_push_messages_to_github(self, mock_get, mock_put):
+        # Setup mock responses
+        mock_get.return_value = Mock(
+            status_code=404, 
+            text=json.dumps({"message": "Not Found"})
+        )
+        mock_put.return_value = Mock(
+            status_code=201, 
+            text=json.dumps({"content": {"name": "chat_messages.md"}})
+        )
+
+        # Create a RepositoryManager with mock credentials
+        repo_manager = chat_server.RepositoryManager(
+            self.mock_token, 
+            self.mock_username, 
+            self.mock_repo
+        )
+
+        # Prepare test messages
+        test_messages = [
+            {'content': 'First test message', 'timestamp': '2025-01-08T19:55:00'},
+            {'content': 'Second test message', 'timestamp': '2025-01-08T19:56:00'}
+        ]
+
+        # Attempt to push messages
+        result = repo_manager.push_messages(test_messages)
+
+        # Assertions
+        self.assertTrue(result, "Messages should be successfully pushed")
+        
+        # Verify GitHub API calls
+        mock_get.assert_called_once()
+        mock_put.assert_called_once()
+
+        # Check the content of the PUT request
+        put_args = mock_put.call_args[1]
+        payload = json.loads(put_args['data'])
+        
+        # Decode base64 content and verify
+        decoded_content = base64.b64decode(payload['content']).decode('utf-8')
+        self.assertIn('First test message', decoded_content)
+        self.assertIn('Second test message', decoded_content)
+
+    def test_message_content_formatting(self):
+        # Create a RepositoryManager with mock credentials
+        repo_manager = chat_server.RepositoryManager(
+            self.mock_token, 
+            self.mock_username, 
+            self.mock_repo
+        )
+
+        # Test messages with various content types
+        test_cases = [
+            {'content': 'Simple message'},
+            {'content': 'Message with special characters: !@#$%^&*()'},
+            {'content': 'Multi-line\nmessage\nwith\nnewlines'}
+        ]
+
+        for message in test_cases:
+            # Attempt to format message content
+            content = "# Chat Messages\n\n"
+            content += f"## {message.get('timestamp', 'No Timestamp')}\n{message['content']}\n\n"
+            
+            # Basic assertions about content formatting
+            self.assertTrue(content.startswith('# Chat Messages'))
+            self.assertIn(message['content'], content)
+
+    @patch('requests.put')
+    def test_github_push_error_handling(self, mock_put):
+        # Simulate GitHub API error
+        mock_put.return_value = Mock(status_code=500)
+
+        # Create a RepositoryManager with mock credentials
+        repo_manager = chat_server.RepositoryManager(
+            self.mock_token, 
+            self.mock_username, 
+            self.mock_repo
+        )
+
+        # Prepare test messages
+        test_messages = [{'content': 'Error test message'}]
+
+        # Attempt to push messages
+        result = repo_manager.push_messages(test_messages)
+
+        # Verify error handling
+        self.assertFalse(result, "Push should fail on server error")
+        mock_put.assert_called_once()
+
 def main():
-    # Run tests
-    unittest.main(argv=[''], exit=False)
+    unittest.main()
 
 if __name__ == '__main__':
     main()

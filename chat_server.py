@@ -59,11 +59,19 @@ class RepositoryManager:
             print(f"🔍 Attempting to push {len(messages)} messages to repository")
             print(f"Repository: {self.repository_name}")
             print(f"GitHub Username: {self.github_username}")
+            print(f"GitHub Token: {'*' * 8 + self.github_token[-4:] if self.github_token else 'Not Set'}")
+
+            # Validate inputs
+            if not messages:
+                print("❌ No messages to push")
+                return False
 
             # Create a markdown file with messages
             content = "# Chat Messages\n\n"
             for msg in messages:
-                content += f"## {msg.get('timestamp', 'No Timestamp')}\n{msg['content']}\n\n"
+                timestamp = msg.get('timestamp', 'No Timestamp')
+                message_content = msg.get('content', 'No Content')
+                content += f"## {timestamp}\n{message_content}\n\n"
 
             # Get the current SHA of the file (if it exists)
             file_path = 'chat_messages.md'
@@ -73,46 +81,53 @@ class RepositoryManager:
                 # Log the exact API request details
                 print(f"🌐 GitHub API URL: {url}")
                 
-                response = requests.get(url, headers=self.headers)
-                
-                # Log the GET response details
-                print(f"GET Response Status: {response.status_code}")
-                print(f"GET Response Content: {response.text}")
-                
-                existing_file = response.json() if response.status_code == 200 else None
+                # First, try to get the existing file
+                get_response = requests.get(url, headers=self.headers)
+                print(f"GET Response Status: {get_response.status_code}")
+                print(f"GET Response Content: {get_response.text}")
                 
                 # Prepare payload for creating/updating file
                 payload = {
                     'message': f'Update chat messages ({len(messages)} total)',
                     'content': base64.b64encode(content.encode()).decode(),
-                    'branch': 'main'
+                    'branch': 'master'  # Explicitly set to master
                 }
                 
-                if existing_file:
-                    # If file exists, include its SHA for update
+                # If file exists, include its SHA for update
+                if get_response.status_code == 200:
+                    existing_file = get_response.json()
                     payload['sha'] = existing_file['sha']
                 
                 # Log the PUT payload
                 print(f"📤 Payload Message: {payload['message']}")
                 print(f"📤 Payload Content Length: {len(payload['content'])} bytes")
                 
-                response = requests.put(url, 
+                # Perform the PUT request to create/update the file
+                put_response = requests.put(url, 
                     headers=self.headers, 
                     data=json.dumps(payload)
                 )
                 
                 # Log the PUT response details
-                print(f"PUT Response Status: {response.status_code}")
-                print(f"PUT Response Content: {response.text}")
+                print(f"PUT Response Status: {put_response.status_code}")
+                print(f"PUT Response Content: {put_response.text}")
                 
-                response.raise_for_status()
-                print("✅ Messages successfully pushed to GitHub!")
-                return True
+                # Check for successful response
+                if put_response.status_code in [200, 201]:
+                    print("✅ Messages successfully pushed to GitHub!")
+                    return True
+                else:
+                    print(f"❌ GitHub API Error: {put_response.text}")
+                    return False
+            
             except requests.exceptions.RequestException as e:
-                print(f"❌ GitHub API Error: {e}")
+                print(f"❌ Network Error: {e}")
                 return False
+        
         except Exception as e:
             print(f"❌ Unexpected error pushing messages: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 class MessageHandler(http.server.SimpleHTTPRequestHandler):
@@ -204,6 +219,6 @@ def run_server(port=None):
         print(f"❌ Failed to start server: {e}")
 
 if __name__ == "__main__":
-    port = 8082  # Explicitly set to 8082
+    port = 8090  # Explicitly set to 8090
     print(f"🚀 Starting server on port {port}")
     run_server(port)
