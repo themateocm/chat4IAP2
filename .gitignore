@@ -1,0 +1,13 @@
+# Environment files
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Database and log files
+*.db
+*.log
+
+# macOS system files
+.DS_Store
